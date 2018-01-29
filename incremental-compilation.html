@@ -1,0 +1,283 @@
+<!DOCTYPE HTML>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Incremental compilation - Guide to Rustc Development</title>
+        <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+        <meta name="description" content="A guide to developing rustc ">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+
+        <base href="">
+
+        <link rel="stylesheet" href="book.css">
+        <link href="https://fonts.googleapis.com/css?family=Open+Sans:300italic,400italic,600italic,700italic,800italic,400,300,600,700,800" rel="stylesheet" type="text/css">
+        <link href="https://fonts.googleapis.com/css?family=Source+Code+Pro:500" rel="stylesheet" type="text/css">
+
+        <link rel="shortcut icon" href="favicon.png">
+
+        <!-- Font Awesome -->
+        <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/font-awesome/4.3.0/css/font-awesome.min.css">
+
+        <link rel="stylesheet" href="highlight.css">
+        <link rel="stylesheet" href="tomorrow-night.css">
+        <link rel="stylesheet" href="ayu-highlight.css">
+
+        <!-- Custom theme -->
+        
+
+        
+
+        <!-- Fetch Clipboard.js from CDN but have a local fallback -->
+        <script src="https://cdn.jsdelivr.net/clipboard.js/1.6.1/clipboard.min.js"></script>
+        <script>
+            if (typeof Clipboard == 'undefined') {
+                document.write(unescape("%3Cscript src='clipboard.min.js'%3E%3C/script%3E"));
+            }
+        </script>
+
+        <!-- Fetch JQuery from CDN but have a local fallback -->
+        <script src="https://code.jquery.com/jquery-2.1.4.min.js"></script>
+        <script>
+            if (typeof jQuery == 'undefined') {
+                document.write(unescape("%3Cscript src='jquery.js'%3E%3C/script%3E"));
+            }
+        </script>
+
+        <!-- Fetch store.js from local - TODO add CDN when 2.x.x is available on cdnjs -->
+        <script src="store.js"></script>
+
+    </head>
+    <body class="light">
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script type="text/javascript">
+            var theme = store.get('mdbook-theme');
+            if (theme === null || theme === undefined) { theme = 'light'; }
+            $('body').removeClass().addClass(theme);
+        </script>
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script type="text/javascript">
+            var sidebar = store.get('mdbook-sidebar');
+            if (sidebar === "hidden") { $("html").addClass("sidebar-hidden") }
+            else if (sidebar === "visible") { $("html").addClass("sidebar-visible") }
+        </script>
+
+        <div id="sidebar" class="sidebar">
+            <ul class="chapter"><li><a href="./about-this-guide.html"><strong>1.</strong> About this guide</a></li><li><a href="./how-to-build-and-run.html"><strong>2.</strong> How to build the compiler and run what you built</a></li><li><a href="./running-tests.html"><strong>3.</strong> Using the compiler testing framework</a></li><li><a href="./walkthrough.html"><strong>4.</strong> Walkthrough: a typical contribution</a></li><li><a href="./high-level-overview.html"><strong>5.</strong> High-level overview of the compiler source</a></li><li><a href="./query.html"><strong>6.</strong> Queries: demand-driven compilation</a></li><li><ul class="section"><li><a href="./incremental-compilation.html" class="active"><strong>6.1.</strong> Incremental compilation</a></li></ul></li><li><a href="./the-parser.html"><strong>7.</strong> The parser</a></li><li><a href="./macro-expansion.html"><strong>8.</strong> Macro expansion</a></li><li><a href="./name-resolution.html"><strong>9.</strong> Name resolution</a></li><li><a href="./hir.html"><strong>10.</strong> The HIR (High-level IR)</a></li><li><a href="./ty.html"><strong>11.</strong> The <code>ty</code> module: representing types</a></li><li><a href="./type-inference.html"><strong>12.</strong> Type inference</a></li><li><a href="./trait-resolution.html"><strong>13.</strong> Trait resolution</a></li><li><a href="./type-checking.html"><strong>14.</strong> Type checking</a></li><li><a href="./mir.html"><strong>15.</strong> The MIR (Mid-level IR)</a></li><li><ul class="section"><li><a href="./mir-construction.html"><strong>15.1.</strong> MIR construction</a></li><li><a href="./mir-borrowck.html"><strong>15.2.</strong> MIR borrowck</a></li><li><a href="./mir-optimizations.html"><strong>15.3.</strong> MIR optimizations</a></li></ul></li><li><a href="./trans.html"><strong>16.</strong> trans: generating LLVM IR</a></li><li><a href="./glossary.html"><strong>17.</strong> Glossary</a></li></ul>
+        </div>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page" tabindex="-1">
+                
+                <div id="menu-bar" class="menu-bar">
+                    <div class="left-buttons">
+                        <i id="sidebar-toggle" class="fa fa-bars" title="Toggle sidebar"></i>
+                        <i id="theme-toggle" class="fa fa-paint-brush" title="Change theme"></i>
+                    </div>
+
+                    <h1 class="menu-title">Guide to Rustc Development</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html">
+                            <i id="print-button" class="fa fa-print" title="Print this book"></i>
+                        </a>
+                    </div>
+                </div>
+
+                <div id="content" class="content">
+                    <a class="header" href="./incremental-compilation.html#incremental-compilation" id="incremental-compilation"><h1>Incremental compilation</h1></a>
+<p>The incremental compilation scheme is, in essence, a surprisingly
+simple extension to the overall query system. We'll start by describing
+a slightly simplified variant of the real thing, the &quot;basic algorithm&quot;, and then describe
+some possible improvements.</p>
+<a class="header" href="./incremental-compilation.html#the-basic-algorithm" id="the-basic-algorithm"><h2>The basic algorithm</h2></a>
+<p>The basic algorithm is
+called the <strong>red-green</strong> algorithm<sup class="footnote-reference"><a href="./incremental-compilation.html#salsa">1</a></sup>. The high-level idea is
+that, after each run of the compiler, we will save the results of all
+the queries that we do, as well as the <strong>query DAG</strong>. The
+<strong>query DAG</strong> is a <a href="https://en.wikipedia.org/wiki/Directed_acyclic_graph">DAG</a> that indices which queries executed which
+other queries. So for example there would be an edge from a query Q1
+to another query Q2 if computing Q1 required computing Q2 (note that
+because queries cannot depend on themselves, this results in a DAG and
+not a general graph).</p>
+<p>On the next run of the compiler, then, we can sometimes reuse these
+query results to avoid re-executing a query. We do this by assigning
+every query a <strong>color</strong>:</p>
+<ul>
+<li>If a query is colored <strong>red</strong>, that means that its result during
+this compilation has <strong>changed</strong> from the previous compilation.</li>
+<li>If a query is colored <strong>green</strong>, that means that its result is
+the <strong>same</strong> as the previous compilation.</li>
+</ul>
+<p>There are two key insights here:</p>
+<ul>
+<li>First, if all the inputs to query Q are colored green, then the
+query Q <strong>must</strong> result in the same value as last time and hence
+need not be re-executed (or else the compiler is not deterministic).</li>
+<li>Second, even if some inputs to a query changes, it may be that it
+<strong>still</strong> produces the same result as the previous compilation. In
+particular, the query may only use part of its input.
+<ul>
+<li>Therefore, after executing a query, we always check whether it
+produced the same result as the previous time. <strong>If it did,</strong> we
+can still mark the query as green, and hence avoid re-executing
+dependent queries.</li>
+</ul>
+</li>
+</ul>
+<a class="header" href="./incremental-compilation.html#the-try-mark-green-algorithm" id="the-try-mark-green-algorithm"><h3>The try-mark-green algorithm</h3></a>
+<p>The core of the incremental compilation is an algorithm called
+&quot;try-mark-green&quot;. It has the job of determining the color of a given
+query Q (which must not yet have been executed). In cases where Q has
+red inputs, determining Q's color may involve re-executing Q so that
+we can compare its output; but if all of Q's inputs are green, then we
+can determine that Q must be green without re-executing it or inspect
+its value what-so-ever. In the compiler, this allows us to avoid
+deserializing the result from disk when we don't need it, and -- in
+fact -- enables us to sometimes skip <em>serializing</em> the result as well
+(see the refinements section below).</p>
+<p>Try-mark-green works as follows:</p>
+<ul>
+<li>First check if there is the query Q was executed during the previous
+compilation.
+<ul>
+<li>If not, we can just re-execute the query as normal, and assign it the
+color of red.</li>
+</ul>
+</li>
+<li>If yes, then load the 'dependent queries' that Q</li>
+<li>If there is a saved result, then we load the <code>reads(Q)</code> vector from the
+query DAG. The &quot;reads&quot; is the set of queries that Q executed during
+its execution.
+<ul>
+<li>For each query R that in <code>reads(Q)</code>, we recursively demand the color
+of R using try-mark-green.
+<ul>
+<li>Note: it is important that we visit each node in <code>reads(Q)</code> in same order
+as they occurred in the original compilation. See <a href="./incremental-compilation.html#dag">the section on the query DAG below</a>.</li>
+<li>If <strong>any</strong> of the nodes in <code>reads(Q)</code> wind up colored <strong>red</strong>, then Q is dirty.
+<ul>
+<li>We re-execute Q and compare the hash of its result to the hash of the result
+from the previous compilation.</li>
+<li>If the hash has not changed, we can mark Q as <strong>green</strong> and return.</li>
+</ul>
+</li>
+<li>Otherwise, <strong>all</strong> of the nodes in <code>reads(Q)</code> must be <strong>green</strong>. In that case,
+we can color Q as <strong>green</strong> and return.</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p><a name="dag"></p>
+<a class="header" href="./incremental-compilation.html#the-query-dag" id="the-query-dag"><h3>The query DAG</h3></a>
+<p>The query DAG code is stored in
+<a href="https://github.com/rust-lang/rust/tree/master/src/librustc/dep_graph"><code>src/librustc/dep_graph</code></a>. Construction of the DAG is done
+by instrumenting the query execution.</p>
+<p>One key point is that the query DAG also tracks ordering; that is, for
+each query Q, we noy only track the queries that Q reads, we track the
+<strong>order</strong> in which they were read.  This allows try-mark-green to walk
+those queries back in the same order. This is important because once a subquery comes back as red,
+we can no longer be sure that Q will continue along the same path as before.
+That is, imagine a query like this:</p>
+<pre><code class="language-rust ignore">fn main_query(tcx) {
+    if tcx.subquery1() {
+        tcx.subquery2()
+    } else {
+        tcx.subquery3()
+    }
+}
+</code></pre>
+<p>Now imagine that in the first compilation, <code>main_query</code> starts by
+executing <code>subquery1</code>, and this returns true. In that case, the next
+query <code>main_query</code> executes will be <code>subquery2</code>, and <code>subquery3</code> will
+not be executed at all.</p>
+<p>But now imagine that in the <strong>next</strong> compilation, the input has
+changed such that <code>subquery</code> returns <strong>false</strong>. In this case, <code>subquery2</code> would never
+execute. If try-mark-green were to visit <code>reads(main_query)</code> out of order,
+however, it might have visited <code>subquery2</code> before <code>subquery1</code>, and hence executed it.
+This can lead to ICEs and other problems in the compiler.</p>
+<a class="header" href="./incremental-compilation.html#improvements-to-the-basic-algorithm" id="improvements-to-the-basic-algorithm"><h2>Improvements to the basic algorithm</h2></a>
+<p>In the description basic algorithm, we said that at the end of
+compilation we would save the results of all the queries that were
+performed.  In practice, this can be quite wasteful -- many of those
+results are very cheap to recompute, and serializing + deserializing
+them is not a particular win. In practice, what we would do is to save
+<strong>the hashes</strong> of all the subqueries that we performed. Then, in select cases,
+we <strong>also</strong> save the results.</p>
+<p>This is why the incremental algorithm separates computing the
+<strong>color</strong> of a node, which often does not require its value, from
+computing the <strong>result</strong> of a node. Computing the result is done via a simple algorithm
+like so:</p>
+<ul>
+<li>Check if a saved result for Q is available. If so, compute the color of Q.
+If Q is green, deserialize and return the saved result.</li>
+<li>Otherwise, execute Q.
+<ul>
+<li>We can then compare the hash of the result and color Q as green if
+it did not change.</li>
+</ul>
+</li>
+</ul>
+<a class="header" href="./incremental-compilation.html#footnotes" id="footnotes"><h1>Footnotes</h1></a>
+<div class="footnote-definition" id="salsa"><sup class="footnote-definition-label">1</sup>
+<p>I have long wanted to rename it to the Salsa algorithm, but it never caught on. -@nikomatsakis</p>
+</div>
+
+                </div>
+
+                <!-- Mobile navigation buttons -->
+                
+                    <a rel="prev" href="./query.html" class="mobile-nav-chapters previous" title="Previous chapter">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+                
+
+                
+                    <a rel="next" href="./the-parser.html" class="mobile-nav-chapters next" title="Next chapter">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+                
+
+            </div>
+
+            
+                <a href="./query.html" class="nav-chapters previous" title="You can navigate through the chapters using the arrow keys">
+                    <i class="fa fa-angle-left"></i>
+                </a>
+            
+
+            
+                <a href="./the-parser.html" class="nav-chapters next" title="You can navigate through the chapters using the arrow keys">
+                    <i class="fa fa-angle-right"></i>
+                </a>
+            
+
+        </div>
+
+
+        <!-- Local fallback for Font Awesome -->
+        <script>
+            if ($(".fa").css("font-family") !== "FontAwesome") {
+                $('<link rel="stylesheet" type="text/css" href="_FontAwesome/css/font-awesome.css">').prependTo('head');
+            }
+        </script>
+
+        <!-- Livereload script (if served using the cli tool) -->
+        
+
+        
+
+        
+
+        
+
+        <script src="highlight.js"></script>
+        <script src="book.js"></script>
+
+        <!-- Custom JS script -->
+        
+
+    </body>
+</html>
